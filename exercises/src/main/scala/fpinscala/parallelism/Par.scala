@@ -1,11 +1,16 @@
 package fpinscala.parallelism
 
 import java.util.concurrent._
+import java.util.concurrent.Executors._
 
 object Par {
   type Par[A] = ExecutorService => Future[A]
   
   def run[A](s: ExecutorService)(a: Par[A]): Future[A] = a(s)
+  
+  val pool = newFixedThreadPool(10)
+
+  def test[T](t: Par[T]) = run(pool)(t)
 
   def unit[A](a: A): Par[A] = (es: ExecutorService) => UnitFuture(a) // `unit` is represented as a function that returns a `UnitFuture`, which is a simple implementation of `Future` that just wraps a constant value. It doesn't use the `ExecutorService` at all. It's always done and can't be cancelled. Its `get` method simply returns the value that we gave it.
   
@@ -28,10 +33,26 @@ object Par {
       def call = a(es).get
     })
 
+  def asyncF[A, B](f: A => B): A => Par[B] = (a: A) => Par.fork(Par.unit(f(a)))
+
   def map[A,B](pa: Par[A])(f: A => B): Par[B] = 
     map2(pa, unit(()))((a,_) => f(a))
 
   def sortPar(parList: Par[List[Int]]) = map(parList)(_.sorted)
+
+  def sequence[A](ps: List[Par[A]]): Par[List[A]] = ps.foldRight(Par.unit(List.empty[A]))( (elem, acc) => Par.map2(elem, acc)(_ :: _))
+
+  def parFilter[A](as: List[A])(f: A => Boolean): Par[List[A]] = map(sequence(as map asyncF{ a => (f(a), a)}))(_.collect{ case (true, a) => a})
+
+  def parMerge[A](zero: A, merge: (A,A) => A)(as: IndexedSeq[A]): Par[A] = 
+    if (as.size <= 1) unit(as.headOption getOrElse zero)
+    else {
+      val (l,r) = as.splitAt(as.length/2)
+      map2(parMerge(zero, merge)(l), parMerge(zero, merge)(r))(merge)
+    }
+
+  def parFold[A, B](as: List[A])(zero: B)(mapF: A => B, reduceF: (B, B) => B): Par[B] = 
+     map(sequence(as.map(asyncF(mapF))))(_.foldLeft(zero)(reduceF))
 
   def equal[A](e: ExecutorService)(p: Par[A], p2: Par[A]): Boolean = 
     p(e).get == p2(e).get
@@ -48,7 +69,6 @@ object Par {
   implicit def toParOps[A](p: Par[A]): ParOps[A] = new ParOps(p)
 
   class ParOps[A](p: Par[A]) {
-
 
   }
 }
